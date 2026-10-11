@@ -1,0 +1,34 @@
+<!doctype html>
+<!-- Copyright (C) 2026 JLW Security. SPDX-License-Identifier: GPL-3.0-or-later -->
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="author" content="JLW Security">
+  <title>Entrar · Domínio Linux</title><link rel="stylesheet" href="/static/app.css?v=20261011-jlw-gpl">
+  <script src="/static/login.js" defer></script>
+</head>
+<body class="login-page">
+  <main class="login-shell">
+    <section class="login-story">
+      <div class="brand"><span class="brand-mark">dl</span><span>domínio<span class="brand-light">linux</span></span></div>
+      <span class="eyebrow">SEU DOMÍNIO. SOB SEU CONTROLE.</span>
+      <h1>Uma casa para<br>todo o seu domínio.</h1>
+      <p>Crie e administre seu domínio em Linux.<br>Conecte pessoas, servidores e estações Windows e Linux em um só lugar.</p>
+      <div class="login-network"><span>Controlador Linux</span><i></i><div><span>Usuários e grupos</span><span>Windows</span><span>Linux</span></div></div>
+      <small>Plataforma local · versão inicial 0.1</small>
+    </section>
+    <section class="login-card">
+      <span class="eyebrow">ÁREA ADMINISTRATIVA</span><h2>Bem-vindo ao painel</h2>
+      <p>Entre para organizar e configurar seu domínio.</p>
+      <form id="login-form">
+        <label for="username">Usuário</label><input id="username" name="username" value="admin" autocomplete="username" required>
+        <label for="password">Senha</label><input id="password" name="password" type="password" autocomplete="current-password" required>
+        <p id="login-error" class="form-error" role="alert"></p>
+        <button class="button primary" type="submit">Entrar no painel <span>→</span></button>
+      </form>
+      <div class="login-note"><strong>Primeiro acesso local</strong><p>A senha inicial está no arquivo <code>.state/initial-password.txt</code> do projeto. Os dados de exemplo ficam separados de qualquer domínio real.</p></div>
+    <div class="login-credits">Desenvolvido por <strong>JLW Security</strong> · © 2026<br>Software livre, sem garantia · Redistribuição conforme <a href="/license" target="_blank" rel="noopener">GPL versão 3 ou posterior</a><br><a href="https://github.com/ugoneiva/dominio-linux" target="_blank" rel="noopener">Código-fonte no GitHub ↗</a></div>
+    </section>
+  </main>
+</body>
+</html>
