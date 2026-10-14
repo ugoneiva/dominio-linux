@@ -9,14 +9,28 @@ import argparse
 from datetime import datetime, timezone
 import getpass
 import grp
+import hashlib
 import ipaddress
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import socket
+import ssl
 import subprocess
 import sys
+import time
+
+TLS_DIR = Path("/var/lib/samba/private/tls")
+BACKUP_DIR = Path("/var/backups/samba-ad")
+AUDIT_LOGS = {
+    # classe de debug do Samba -> (nível, arquivo). Sintaxe "classe:nível@arquivo" existe desde o Samba 4.13.
+    "auth_json_audit": (3, "/var/log/samba/audit-auth.json"),
+    "dsdb_json_audit": (5, "/var/log/samba/audit-dsdb.json"),
+    "dsdb_password_json_audit": (5, "/var/log/samba/audit-password.json"),
+    "dsdb_group_json_audit": (5, "/var/log/samba/audit-group.json"),
+}
 
 
 def run(*args, env=None):
@@ -56,6 +70,8 @@ def valid_manifest(manifest):
     for key in ("hostname", "netbios"):
         if not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9-]{0,14}", manifest[key]) or manifest[key].endswith("-"):
             raise ValueError(f"Nome curto inválido: {key}.")
+    if manifest["hostname"].upper() == manifest["netbios"].upper():
+        raise ValueError("O hostname precisa ser diferente do nome NetBIOS do domínio (o samba-tool recusa).")
     address = ipaddress.IPv4Address(manifest["address"])
     forwarder = ipaddress.IPv4Address(manifest["forwarder"])
     network = ipaddress.IPv4Network(manifest["subnet"], strict=True)
@@ -163,6 +179,143 @@ def provision(manifest, password):
             child.terminate(force=True)
 
 
+def enable_audit(backup, conf=Path("/etc/samba/smb.conf"), logrotate=Path("/etc/logrotate.d/dominio-linux-samba-audit")):
+    """Trilha de auditoria em JSON: autenticações, alterações no diretório, senhas e grupos.
+
+    É o que um SIEM (Wazuh, por exemplo) precisa para ver logins e mudanças de privilégio no
+    domínio desde o primeiro dia. Cada classe vai para um arquivo próprio, com rotação diária.
+    """
+    shutil.copy2(conf, backup / "smb.conf-provisionado")
+    text = conf.read_text()
+    if re.search(r"(?im)^\s*log level\s*=", text):
+        print("Aviso: smb.conf já define 'log level'; auditoria JSON não alterada.", flush=True)
+        return False
+    level = "1 " + " ".join(f"{name}:{lvl}@{path}" for name, (lvl, path) in AUDIT_LOGS.items())
+    block = ("\t# dominio-linux: auditoria JSON (autenticação, diretório, senhas, grupos) para SIEM\n"
+             f"\tlog level = {level}\n\tdebug hires timestamp = yes\n")
+    text, count = re.subn(r"(?im)^(\[global\][^\n]*\n)", lambda m: m.group(1) + block, text, count=1)
+    if not count:
+        raise RuntimeError("Seção [global] não encontrada no smb.conf gerado pelo provisionamento.")
+    write_file(conf, text)
+    write_file(logrotate, "/var/log/samba/audit-*.json {\n    daily\n    rotate 14\n"
+               "    compress\n    delaycompress\n    missingok\n    notifempty\n    copytruncate\n}\n")
+    return True
+
+
+def schedule_backup():
+    """Backup diário do diretório com `samba-tool domain backup offline`.
+
+    O modo offline roda no próprio DC, com o serviço no ar (trava os bancos durante a cópia) e sem
+    credencial: nenhuma senha fica gravada em disco. O arquivo contém segredos do domínio (chaves do
+    krbtgt), por isso o diretório é root 0700 — copie-o para fora do servidor.
+    """
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    BACKUP_DIR.chmod(0o700)
+    write_file("/etc/systemd/system/dominio-linux-backup.service",
+               "[Unit]\nDescription=Backup offline do Samba AD (dominio-linux)\nAfter=samba-ad-dc.service\n\n"
+               "[Service]\nType=oneshot\nUMask=0077\n"
+               f"ExecStart=/usr/bin/samba-tool domain backup offline --targetdir={BACKUP_DIR}\n"
+               f"ExecStartPost=/usr/bin/find {BACKUP_DIR} -name samba-backup-*.tar.bz2 -mtime +14 -delete\n")
+    write_file("/etc/systemd/system/dominio-linux-backup.timer",
+               "[Unit]\nDescription=Backup diário do Samba AD (dominio-linux)\n\n"
+               "[Timer]\nOnCalendar=*-*-* 02:30\nRandomizedDelaySec=15m\nPersistent=true\n\n"
+               "[Install]\nWantedBy=timers.target\n")
+    run("systemctl", "daemon-reload")
+    run("systemctl", "enable", "--now", "dominio-linux-backup.timer")
+
+
+def wait_ports(ports, limit=120):
+    """O systemd diz "active" antes de o Samba abrir as portas; esperar por elas de verdade."""
+    deadline = time.time() + limit
+    missing = set(ports)
+    while missing and time.time() < deadline:
+        out = subprocess.run(["ss", "-Hltn"], capture_output=True, text=True).stdout
+        open_ports = {int(m.group(1)) for m in re.finditer(r":(\d+)\s", out)}
+        missing = {port for port in ports if port not in open_ports}
+        if missing:
+            time.sleep(3)
+    return sorted(missing)
+
+
+def ldaps_ca(manifest, limit=90):
+    """CA autoassinada que o Samba gera no primeiro início, e o teste de que o painel conseguirá usá-la.
+
+    A tela Integração Samba exige certificado validado e o nome do servidor como está no certificado
+    (FQDN do DC, não o IP). Sem esta informação a primeira conexão do painel falha.
+    """
+    ca = TLS_DIR / "ca.pem"
+    deadline = time.time() + limit
+    while not ca.exists() and time.time() < deadline:
+        time.sleep(3)
+    if not ca.exists():
+        return {"ok": False, "detail": f"{ca} não foi gerado; confira 'tls enabled' no smb.conf"}
+    pem = ca.read_text()
+    der = ssl.PEM_cert_to_DER_cert(pem)
+    fqdn = f"{manifest['hostname']}.{manifest['fqdn']}"
+    info = {"ok": False, "path": str(ca), "pem": pem, "sha256": hashlib.sha256(der).hexdigest(), "host": fqdn}
+    try:
+        context = ssl.create_default_context(cadata=pem)
+        with socket.create_connection((manifest["address"], 636), timeout=10) as raw:
+            with context.wrap_socket(raw, server_hostname=fqdn):
+                info["ok"] = True
+                info["detail"] = f"LDAPS validado com a CA do Samba e o nome {fqdn}"
+    except (OSError, ssl.SSLError) as exc:
+        info["detail"] = f"LDAPS não validou com a CA e o nome {fqdn}: {exc}"
+    return info
+
+
+def check(name, ok, detail, critical=True):
+    mark = "OK  " if ok else ("FALHA" if critical else "AVISO")
+    print(f"  [{mark}] {name}: {detail}", flush=True)
+    return {"check": name, "ok": bool(ok), "critical": critical, "detail": detail}
+
+
+def verify(manifest, backup):
+    """Conferência final. Não lança: o domínio já existe; o resultado diz o que falta."""
+    fqdn, host = manifest["fqdn"], f"{manifest['hostname']}.{manifest['fqdn']}"
+
+    def out(*args, timeout=120):
+        try:
+            r = subprocess.run(list(args), capture_output=True, text=True, timeout=timeout)
+            return r.returncode, r.stdout + r.stderr
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return 1, str(exc)
+
+    print("\nConferência final do controlador:", flush=True)
+    results = []
+    code, text = out("systemctl", "is-active", "samba-ad-dc")
+    results.append(check("serviço samba-ad-dc", code == 0, text.strip()))
+    missing = wait_ports([53, 88, 389, 445, 636])
+    results.append(check("portas DNS/Kerberos/LDAP/SMB/LDAPS", not missing,
+                         "53, 88, 389, 445 e 636 ouvindo" if not missing else f"sem resposta: {missing}"))
+    for record, label in ((f"_ldap._tcp.{fqdn}", "SRV LDAP"), (f"_kerberos._udp.{fqdn}", "SRV Kerberos")):
+        code, text = out("host", "-t", "SRV", record, manifest["address"])
+        results.append(check(f"DNS {label}", code == 0 and "has SRV record" in text, record))
+    code, text = out("host", "-t", "A", host, manifest["address"])
+    results.append(check("DNS do controlador", code == 0 and manifest["address"] in text, f"{host} → {manifest['address']}"))
+    code, text = out("smbclient", "-L", "localhost", "-N")
+    has_shares = "sysvol" in text.lower() and "netlogon" in text.lower()
+    results.append(check("compartilhamentos sysvol/netlogon", has_shares, "listados" if has_shares else text.strip()[-200:]))
+    code, text = out("samba-tool", "dbcheck", "--cross-ncs", timeout=600)
+    results.append(check("samba-tool dbcheck", code == 0, (text.strip().splitlines() or ["sem saída"])[-1]))
+    code, text = out("chronyc", "-n", "tracking")
+    synced = code == 0 and "Not synchronised" not in text
+    results.append(check("horário (chrony)", synced, "sincronizado" if synced else "ainda sem sincronizar — Kerberos exige horário correto", critical=False))
+    ntp_signd = Path("/var/lib/samba/ntp_signd/socket").exists()
+    results.append(check("assinatura de horário para Windows (ntp_signd)", ntp_signd, "socket presente" if ntp_signd else "socket ausente", critical=False))
+    ca = ldaps_ca(manifest)
+    results.append(check("LDAPS para o painel", ca["ok"], ca["detail"]))
+    if ca.get("pem"):
+        shutil.copy2(ca["path"], backup / "samba-ldaps-ca.pem")
+    code, text = out("systemctl", "start", "dominio-linux-backup.service", timeout=900)
+    copies = sorted(BACKUP_DIR.glob("samba-backup-*.tar.bz2"))
+    results.append(check("primeiro backup do domínio", code == 0 and bool(copies), str(copies[-1]) if copies else text.strip()[-200:]))
+    for name, (_, path) in AUDIT_LOGS.items():
+        if name == "auth_json_audit":
+            results.append(check("auditoria JSON", Path(path).exists(), path if Path(path).exists() else f"{path} ainda não criado (surge no primeiro login)", critical=False))
+    return results, ca
+
+
 def install(manifest, backup):
     password = getpass.getpass("Nova senha Administrator do domínio (mínimo 12 caracteres): ")
     repeated = getpass.getpass("Repita a senha: ")
@@ -196,13 +349,32 @@ def install(manifest, backup):
     socket_dir.mkdir(exist_ok=True)
     socket_dir.chmod(0o750)
     os.chown(socket_dir, 0, grp.getgrnam("_chrony").gr_gid)
+    audit = enable_audit(backup)
     run("systemctl", "unmask", "samba-ad-dc")
     run("systemctl", "enable", "--now", "samba-ad-dc")
     run("systemctl", "restart", "chrony")
-    run("systemctl", "is-active", "samba-ad-dc", "chrony")
-    result = {"completed_at": datetime.now(timezone.utc).isoformat(), "fqdn": manifest["fqdn"], "controller": manifest["hostname"], "address": manifest["address"], "backup_directory": str(backup), "state": "provisionamento concluído; ingresso de clientes e validação operacional pendentes"}
-    (backup / "result.json").write_text(json.dumps(result, indent=2))
-    print(f"\nControlador Samba criado em Linux: {manifest['hostname']}.{manifest['fqdn']}\nDNS dos membros: {manifest['address']}\nBackup dos arquivos anteriores: {backup}\nConfigure certificado LDAPS confiável para usar a tela Integração Samba.\nLibere as portas de domínio na rede e valide ingresso, políticas e recuperação antes de produção.")
+    schedule_backup()
+    checks, ca = verify(manifest, backup)
+    failed = [item["check"] for item in checks if item["critical"] and not item["ok"]]
+    result = {"completed_at": datetime.now(timezone.utc).isoformat(), "fqdn": manifest["fqdn"], "controller": manifest["hostname"],
+              "address": manifest["address"], "backup_directory": str(backup), "checks": checks,
+              "ldaps": {key: ca.get(key) for key in ("host", "path", "sha256", "ok")}, "audit_json": audit,
+              "state": "provisionamento concluído e conferido; ingresso de clientes pendente" if not failed
+              else "provisionamento concluído com falhas na conferência: " + ", ".join(failed)}
+    (backup / "result.json").write_text(json.dumps(result, indent=2, ensure_ascii=False))
+    fqdn = f"{manifest['hostname']}.{manifest['fqdn']}"
+    print(f"\nControlador Samba criado em Linux: {fqdn}\nDNS dos membros: {manifest['address']}\nBackup dos arquivos anteriores: {backup}")
+    if failed:
+        print("\nATENÇÃO — itens da conferência que falharam: " + ", ".join(failed) + f"\nDetalhes em {backup}/result.json. Corrija antes de ingressar máquinas.")
+    if ca.get("pem"):
+        print(f"\nPara a tela Integração Samba do painel:\n  Hostname do controlador: {fqdn}   (use o nome, não o IP — o certificado é emitido para ele)\n"
+              f"  DN do domínio: {','.join('DC=' + part for part in manifest['fqdn'].split('.'))}\n"
+              f"  Certificado da CA: {ca['path']} (cópia em {backup}/samba-ldaps-ca.pem)\n"
+              f"  SHA-256 da CA: {ca['sha256']}\n  Cole o conteúdo abaixo no campo 'Certificado da CA':\n\n{ca['pem']}")
+    print(f"Backup diário do domínio: {BACKUP_DIR} (timer dominio-linux-backup.timer, 02:30, 14 dias). Copie para fora do servidor.")
+    if audit:
+        print("Auditoria JSON: /var/log/samba/audit-*.json (rotação diária, 14 dias) — pronta para coleta por um SIEM.")
+    print("Libere as portas de domínio na rede e valide ingresso, políticas e recuperação antes de produção.")
 
 
 def main():

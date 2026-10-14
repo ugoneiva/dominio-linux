@@ -21,9 +21,14 @@ def plan(spec: DomainSpec):
         {"title": "Instalar os serviços" if available else "Definir a integração Samba AD DC", "detail": "Instalar Samba AD DC, Kerberos, ferramentas DNS e chrony pelo repositório da distribuição." if available else "Selecionar uma origem de Samba com o papel AD DC e definir pacotes, serviços, SELinux e firewall. Este adaptador ainda não está implementado."},
         {"title": "Criar o domínio", "detail": f"Provisionar {spec.fqdn} no controlador {spec.hostname}; a senha Administrator será solicitada diretamente na VM."},
         {"title": "Configurar DNS e horário", "detail": f"Usar o controlador {spec.address} para resolver o domínio; encaminhador {spec.forwarder}; horário {spec.ntp_server}."},
-        {"title": "Iniciar o controlador Linux", "detail": "Ativar samba-ad-dc e chrony; emitir instruções de conexão e ingresso de membros." if available else "Definir as unidades de serviço do adaptador e validar autenticação, DNS, horário e ingresso de Windows e Linux."},
+        {"title": "Iniciar o controlador Linux", "detail": "Ligar a auditoria JSON do Samba, ativar samba-ad-dc e chrony e agendar o backup diário do domínio." if available else "Definir as unidades de serviço do adaptador e validar autenticação, DNS, horário e ingresso de Windows e Linux."},
     ]
+    if available:
+        steps.append({"title": "Conferir o controlador", "detail": "Portas 53/88/389/445/636, registros SRV de LDAP e Kerberos, sysvol/netlogon, dbcheck, horário, LDAPS com a CA do Samba e o primeiro backup. O resultado fica em result.json; o instalador mostra a CA e o nome a usar na tela Integração Samba."})
     changes = ["Pacotes instalados por apt" if available else "Origem de pacotes AD DC e serviços ainda a definir", "/etc/hostname e hostname da VM", "/etc/hosts", "/etc/resolv.conf", "/etc/krb5.conf", "/etc/samba/smb.conf e estado do domínio", "/etc/chrony/conf.d/dominio-linux.conf" if available else "Configuração chrony conforme a distribuição", "Serviços Samba, resolução local e chrony"]
+    if available:
+        changes += ["Auditoria JSON do Samba em /var/log/samba/audit-*.json e /etc/logrotate.d/dominio-linux-samba-audit",
+                    "Backup diário em /var/backups/samba-ad (dominio-linux-backup.service e .timer)"]
     requirements = ["VM dedicada e snapshot ou backup anterior", "IP estático atribuído à interface; esta versão não altera a configuração da placa", f"Acesso aos repositórios de {profile['label']} e fonte de horário", "Portas do domínio liberadas na rede do laboratório", "Certificado LDAPS confiável para consultar pelo painel"]
     if not available:
         requirements.append("Implementação e validação do instalador específico de Samba AD DC; pacotes para servidor membro não comprovam o papel de controlador")
@@ -61,8 +66,12 @@ Estado: {profile['status']}
 5. Siga o resultado emitido pelo instalador.
 
 O instalador é uma implementação inicial, ainda sem execução validada em VM.
-Ele não configura firewall, IP da interface, certificado de CA ou segundo DC.
-Configure a cadeia LDAPS antes de usar a tela Integração Samba.
+Ele não configura firewall, IP da interface ou segundo DC.
+Ao terminar, ele confere o controlador (portas, DNS, sysvol, dbcheck, horário,
+LDAPS e backup) e mostra a CA do Samba e o nome do controlador a usar na tela
+Integração Samba — use o nome completo (FQDN), não o IP.
+Também liga a auditoria JSON do Samba (/var/log/samba/audit-*.json) e agenda
+backup diário do domínio em /var/backups/samba-ad; copie-o para fora da VM.
 O painel não transmite nem persiste a senha Administrator.
 Falhas interrompem o processo. Não há rollback automático de domínio parcial;
 consulte os backups e restaure o snapshot da VM quando necessário.

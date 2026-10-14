@@ -4,9 +4,12 @@
 
 Plataforma local para **criar e administrar um domínio Samba em Linux**, com servidores e workstations Windows e Linux como membros. Nome provisório do projeto.
 
-## Versão inicial — 0.1.0
+## Versão 0.1.1
 
-Esta entrega inicia o projeto com aplicação executável e fluxo de provisionamento. Ainda não é uma plataforma pronta para produção.
+A 0.1.0 iniciou o projeto com aplicação executável e fluxo de provisionamento. A 0.1.1 corrige pontos do instalador
+que fariam a criação do domínio falhar ou ficar inutilizável pelo painel, acrescenta conferência final, auditoria e
+backup ao controlador criado, e traz os primeiros testes automatizados — ver [registro da 0.1.1](docs/REGISTRO-2026-10-14.md).
+Ainda não é uma plataforma pronta para produção.
 
 | Recurso | Estado desta versão |
 | --- | --- |
@@ -77,6 +80,13 @@ sudo /usr/bin/python3 provision_dc.py --manifest manifest.json
 
 O instalador solicita confirmação do domínio e a senha Administrator no terminal. Instala os pacotes da distribuição selecionada, provisiona Samba, configura resolução DNS/Kerberos/chrony e inicia o controlador. A senha não aparece em argumentos de processo, no manifesto ou no plano.
 
+Ao terminar, o instalador:
+
+- **confere o controlador de verdade** — o `systemctl` diz "ativo" antes de o Samba abrir as portas. São conferidos: portas 53/88/389/445/636, registros SRV de LDAP e Kerberos, registro A do controlador, compartilhamentos `sysvol`/`netlogon`, `samba-tool dbcheck`, horário (chrony e `ntp_signd`), LDAPS e o primeiro backup. O resultado vai para `result.json`, e falhas aparecem em destaque;
+- **mostra a CA do LDAPS** gerada pelo Samba (`/var/lib/samba/private/tls/ca.pem`), com SHA-256, o hostname e o DN a usar na tela **Integração Samba**. Use o **nome completo do controlador**, não o IP: o certificado é emitido para o nome;
+- **liga a auditoria JSON do Samba** (autenticação, alterações no diretório, senhas e grupos) em `/var/log/samba/audit-*.json`, com rotação diária por 14 dias — pronta para coleta por um SIEM;
+- **agenda backup diário** do domínio (`samba-tool domain backup offline`, sem credencial gravada) em `/var/backups/samba-ad`, guardando 14 dias. O arquivo contém segredos do domínio; copie-o para fora da VM.
+
 **Limites:** instalador escrito, ainda sem execução validada em VM nesta entrega. Não altera o IP da interface, não configura firewall, não emite certificado de CA, não ingressa estações e não configura outro DC. Em falha, interrompe o processo; não há rollback automático de um domínio parcial. Preserve a saída, consulte `/root/dominio-linux-backups` e restaure o snapshot antes de repetir sobre uma VM parcialmente provisionada.
 
 ## Consultar Samba pelo painel
@@ -98,12 +108,13 @@ app/
   auth.py              Administrador local e sessões
   store.py             SQLite do laboratório e histórico
   models.py            Validação das entradas
-  directory.py         Conector LDAPS de leitura
+  directory.py         Conector LDAPS de leitura e classificação de erros
   provisioning.py      Plano e pacote de criação
   resources/           Instalador empacotado para a VM
   static/              Interface web, sem CDN
   templates/           Login e estrutura do painel
 docs/                  Escopo, arquitetura, entregas e fontes
+tests/                 Testes automatizados (pytest)
 scripts/               Inicialização local e administração do painel
 .state/                Dados locais e senha inicial; fora do Git
 ```
@@ -114,7 +125,14 @@ SQLite atende a primeira entrega local. O diretório Samba será a fonte das ide
 
 Consulte [arquitetura](docs/ARQUITETURA.md), [plano de entregas](docs/ENTREGAS.md), [fontes técnicas](docs/FONTES.md) e [registro desta entrega](docs/REGISTRO-2026-10-11.md).
 
-Não foram adicionados nem executados testes automatizados nesta atividade. Inicialização local, instalação de dependências e inspeção do código não comprovam funcionamento em Samba real ou em produção.
+Testes automatizados (validações, pacote sem senha, manifesto do instalador, auditoria no `smb.conf`, CSRF/Origin, limite de corpo, erros LDAP e cache da visão geral):
+
+```bash
+.venv/bin/python -m pip install pytest httpx
+.venv/bin/python -m pytest
+```
+
+Os testes não comprovam funcionamento em Samba real: a execução do instalador em VM e a consulta LDAPS a um domínio de verdade continuam pendentes (entrega 0.2).
 
 ## Licença e créditos
 

@@ -2,7 +2,8 @@
 """Conector LDAPS de leitura. Escritas reais serão implementadas por operação."""
 import ssl
 
-from ldap3 import BASE, SUBTREE, Connection, Server, Tls
+from ldap3 import BASE, NO_ATTRIBUTES, SUBTREE, Connection, Server, Tls
+from ldap3.core import exceptions as ldap_errors
 
 from .models import LdapCredentials
 
@@ -14,6 +15,20 @@ QUERIES = {
     "computers": ("(objectClass=computer)", ["name", "sAMAccountName", "operatingSystem", "userAccountControl", "description"]),
     "policies": ("(objectClass=groupPolicyContainer)", ["displayName", "name", "flags", "gPCFileSysPath"]),
 }
+
+
+def classify(exc):
+    """Categoria do erro para o usuário e para o log. Nunca inclui a senha (o ldap3 não a coloca nas mensagens)."""
+    text = f"{type(exc).__name__}: {exc}"
+    if isinstance(exc, ssl.SSLError) or "certificate" in text.lower() or "CERTIFICATE_VERIFY" in text or "hostname" in text.lower():
+        return "certificado", "O certificado LDAPS não foi validado. Confira a CA informada e use o nome do controlador como está no certificado (FQDN, não o IP)."
+    if isinstance(exc, ldap_errors.LDAPBindError) or "invalidCredentials" in text:
+        return "credenciais", "Usuário ou senha da conta de consulta recusados pelo controlador."
+    if isinstance(exc, (ldap_errors.LDAPSocketOpenError, ldap_errors.LDAPSocketReceiveError, ldap_errors.LDAPSessionTerminatedByServerError, OSError)):
+        return "conexao", "Sem conexão LDAPS com o controlador. Confira hostname, porta 636 e o firewall."
+    if isinstance(exc, ValueError):
+        return "dn", str(exc)
+    return "outro", "Não foi possível consultar o Samba. Confira disponibilidade, permissões e certificado LDAPS."
 
 
 class Directory:
@@ -35,6 +50,22 @@ class Directory:
             if str(actual).casefold() != self.credentials.base_dn.casefold():
                 raise ValueError("O DN informado não corresponde ao domínio apresentado pelo controlador.")
             return {"host": self.credentials.host, "base_dn": actual, "tls": "certificado validado", "access": "somente leitura"}
+        finally:
+            connection.unbind()
+
+    def counts(self, kinds):
+        """Totais por tipo numa ÚNICA conexão, sem trazer atributos (a visão geral só precisa dos números)."""
+        connection = self.connection()
+        try:
+            totals = {}
+            for kind in kinds:
+                total = 0
+                for entry in connection.extend.standard.paged_search(self.credentials.base_dn, QUERIES[kind][0], search_scope=SUBTREE,
+                                                                      attributes=NO_ATTRIBUTES, paged_size=1000, generator=True):
+                    if entry.get("type") == "searchResEntry":
+                        total += 1
+                totals[kind] = total
+            return totals
         finally:
             connection.unbind()
 

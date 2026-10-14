@@ -54,7 +54,10 @@ flowchart TD
 - Pré-requisitos recusam outro sistema, ausência de root, IP ausente/dinâmico e estado de domínio existente.
 - Backups dos arquivos alterados ficam em diretório root protegido; snapshot/backup da VM é requisito do fluxo.
 - A instalação interrompe em falha. Não há retomada nem rollback automático de banco Samba parcial nesta versão.
-- Firewall, emissão de certificados, segundo DC, ingresso de membros e recuperação completa ainda não são automatizados.
+- Ao final: conferência real (portas, SRV, sysvol/netlogon, dbcheck, horário, LDAPS validado, primeiro backup) em `result.json`; a CA do LDAPS e o nome do controlador são mostrados para a tela Integração Samba.
+- Auditoria JSON do Samba por classe (`auth_json_audit`, `dsdb_json_audit`, `dsdb_password_json_audit`, `dsdb_group_json_audit`) em `/var/log/samba/audit-*.json`, com logrotate.
+- Backup diário `samba-tool domain backup offline` por systemd timer, sem credencial em disco, em `/var/backups/samba-ad` (root 0700).
+- Firewall, certificado de CA corporativa, segundo DC, ingresso de membros e recuperação a partir do backup ainda não são automatizados.
 
 ### Consulta ao domínio
 
@@ -62,6 +65,8 @@ flowchart TD
 - Conta de consulta fornecida pelo administrador para o domínio selecionado.
 - Credenciais somente em memória por sessão, com expiração, desconexão e descarte no encerramento.
 - Conector utiliza `read_only=True`, não segue referências para outros servidores e consulta usuários, grupos, OUs, computadores e GPOs com paginação.
+- A visão geral conta objetos numa única conexão, sem atributos, e guarda os totais por 2 minutos por sessão.
+- Erros são classificados (certificado, credenciais, conexão, DN) para a tela e para o log do servidor, sem credenciais.
 - No modo conectado, a API recusa escritas nos cadastros de laboratório.
 - Consultas reais não usam os objetos fictícios para completar resultados ausentes.
 - Contas de computador não são telemetria de disponibilidade, inventário do sistema instalado ou prova de ingresso saudável.
@@ -80,4 +85,4 @@ flowchart TD
 
 ## Estado de validação
 
-Código e dependências preparados nesta atividade. Nenhum teste automatizado foi adicionado ou executado. Conector LDAPS, instalador e políticas ainda não foram validados contra uma VM/domain real.
+Desde a 0.1.1 há testes automatizados (`pytest`), cobrindo validações, pacote, manifesto do instalador, auditoria no `smb.conf`, CSRF/Origin, limite de corpo, classificação de erros e cache. Conector LDAPS, instalador e políticas ainda não foram validados contra uma VM/domínio real.

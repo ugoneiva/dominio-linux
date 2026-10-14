@@ -75,6 +75,10 @@ class DomainSpec(StrictModel):
             raise ValueError("O IP do controlador precisa pertencer à sub-rede e ser um endereço de host.")
         if self.address == self.forwarder:
             raise ValueError("O encaminhador DNS precisa ser diferente do próprio controlador.")
+        # O samba-tool recusa o provisionamento quando o nome curto do servidor é igual ao
+        # nome NetBIOS do domínio ("Domain ... must not be equal to short host name").
+        if self.hostname.upper() == self.netbios.upper():
+            raise ValueError("O hostname do controlador precisa ser diferente do nome NetBIOS do domínio.")
         return self
 
 

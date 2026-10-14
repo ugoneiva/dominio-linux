@@ -2,6 +2,7 @@
 from contextlib import asynccontextmanager
 import ipaddress
 import json
+import logging
 import os
 from pathlib import Path
 import sqlite3
@@ -17,17 +18,23 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .auth import Auth
-from .directory import Directory, QUERIES
+from .directory import Directory, QUERIES, classify
 from .distributions import DISTRIBUTIONS
 from .models import DomainSpec, LdapCredentials, Login, Record
 from .provisioning import package, plan
 from .store import Store
 
+VERSION = "0.1.1"
 ROOT = Path(__file__).resolve().parent
 STATE = Path(os.environ.get("DL_STATE_DIR", str(ROOT.parent / ".state")))
 KINDS = {"users", "groups", "ous", "computers", "dns", "policies", "shares"}
 connections = {}
 connections_lock = threading.RLock()
+# Totais da visão geral por sessão: sem isto, cada abertura do painel refazia todas as listagens do diretório.
+overview_cache = {}
+OVERVIEW_TTL = 120
+BODY_LIMIT = 65536
+log = logging.getLogger("uvicorn.error")
 
 
 @asynccontextmanager
@@ -37,9 +44,53 @@ async def lifespan(app):
     yield
     with connections_lock:
         connections.clear()
+        overview_cache.clear()
 
 
-app = FastAPI(title="Domínio Linux", version="0.1.0", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+class BodyLimit:
+    """Limita o corpo das requisições de escrita, com ou sem Content-Length.
+
+    Middleware ASGI: lê o corpo uma vez, recusa acima do limite e o reapresenta à aplicação.
+    Substitui a gravação em `request._body`, atributo interno do Starlette sujeito a mudar.
+    """
+
+    def __init__(self, app, limit=BODY_LIMIT):
+        self.app, self.limit = app, limit
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope["method"] in {"GET", "HEAD", "OPTIONS"}:
+            return await self.app(scope, receive, send)
+        declared = dict(scope.get("headers") or []).get(b"content-length")
+        if declared is not None:
+            try:
+                size = int(declared)
+            except ValueError:
+                return await JSONResponse({"detail": "Tamanho de solicitação inválido."}, status_code=400)(scope, receive, send)
+            if size < 0 or size > self.limit:
+                return await JSONResponse({"detail": "A solicitação excede o tamanho permitido."}, status_code=413)(scope, receive, send)
+        body = bytearray()
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            body.extend(message.get("body", b""))
+            if len(body) > self.limit:
+                return await JSONResponse({"detail": "A solicitação excede o tamanho permitido."}, status_code=413)(scope, receive, send)
+            if not message.get("more_body"):
+                break
+        delivered = False
+
+        async def replay():
+            nonlocal delivered
+            if not delivered:
+                delivered = True
+                return {"type": "http.request", "body": bytes(body), "more_body": False}
+            return await receive()
+
+        return await self.app(scope, replay, send)
+
+
+app = FastAPI(title="Domínio Linux", version=VERSION, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=[host.strip() for host in os.environ.get("DL_ALLOWED_HOSTS", "127.0.0.1,localhost").split(",")])
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 templates = Jinja2Templates(directory=ROOT / "templates")
@@ -53,23 +104,14 @@ async def security_headers(request, call_next):
             return JSONResponse({"detail": "Origem da operação não autorizada."}, status_code=403)
         if request.headers.get("sec-fetch-site") == "cross-site":
             return JSONResponse({"detail": "Origem da operação não autorizada."}, status_code=403)
-        try:
-            length = int(request.headers.get("content-length", "0") or "0")
-        except ValueError:
-            return JSONResponse({"detail": "Tamanho de solicitação inválido."}, status_code=400)
-        if length < 0 or length > 65536:
-            return JSONResponse({"detail": "A solicitação excede o tamanho permitido."}, status_code=413)
-        # Também limitar corpos sem Content-Length. O Request cacheia o corpo
-        # para que os modelos FastAPI consigam consumi-lo em seguida.
-        body = bytearray()
-        async for chunk in request.stream():
-            body.extend(chunk)
-            if len(body) > 65536:
-                return JSONResponse({"detail": "A solicitação excede o tamanho permitido."}, status_code=413)
-        request._body = bytes(body)
+        # O tamanho do corpo é limitado pelo middleware ASGI BodyLimit (registrado abaixo).
     response = await call_next(request)
     response.headers.update({"X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY", "Referrer-Policy": "same-origin", "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'", "Cache-Control": "no-store"})
     return response
+
+
+# Registrado depois do decorator acima = camada mais externa: o corpo é limitado antes de tudo.
+app.add_middleware(BodyLimit)
 
 
 @app.exception_handler(RequestValidationError)
@@ -103,7 +145,7 @@ def home(request: Request):
         session(request)
     except HTTPException:
         return templates.TemplateResponse(request=request, name="login.html", context={})
-    return templates.TemplateResponse(request=request, name="index.html", context={"version": "0.1.0"})
+    return templates.TemplateResponse(request=request, name="index.html", context={"version": VERSION})
 
 
 @app.get("/license", response_class=FileResponse)
@@ -123,6 +165,7 @@ def login(body: Login, request: Request):
 def logout(request: Request, s=Depends(session)):
     with connections_lock:
         connections.pop(s["token_hash"], None)
+        overview_cache.pop(s["token_hash"], None)
     request.app.state.auth.logout(request)
     response = JSONResponse({"ok": True})
     response.delete_cookie("dl_session")
@@ -132,7 +175,7 @@ def logout(request: Request, s=Depends(session)):
 @app.get("/api/session")
 def session_info(request: Request, s=Depends(session)):
     credentials = connection_for(s)
-    return {"actor": s["actor"], "csrf": s["csrf"], "mode": "ldaps" if credentials else "laboratorio", "connection": {"host": credentials.host, "base_dn": credentials.base_dn} if credentials else None, "version": "0.1.0"}
+    return {"actor": s["actor"], "csrf": s["csrf"], "mode": "ldaps" if credentials else "laboratorio", "connection": {"host": credentials.host, "base_dn": credentials.base_dn} if credentials else None, "version": VERSION}
 
 
 def list_records(request, s, kind):
@@ -144,9 +187,28 @@ def list_records(request, s, kind):
             raise HTTPException(501, "Este módulo ainda não possui integração de leitura com o domínio real.")
         try:
             return Directory(credentials).records(kind)
-        except Exception:
-            raise HTTPException(502, "Não foi possível consultar o Samba. Confira disponibilidade, permissões e certificado LDAPS.") from None
+        except Exception as exc:
+            category, message = classify(exc)
+            log.warning("LDAPS %s ao listar %s em %s: %s", category, kind, credentials.host, type(exc).__name__)
+            raise HTTPException(502, message) from None
     return request.app.state.store.records(kind)
+
+
+def overview_counts(s, credentials):
+    key = s["token_hash"]
+    with connections_lock:
+        cached = overview_cache.get(key)
+    if cached and cached[0] > time.time():
+        return cached[1]
+    try:
+        counts = Directory(credentials).counts(("users", "groups", "ous", "computers", "policies"))
+    except Exception as exc:
+        category, message = classify(exc)
+        log.warning("LDAPS %s na visão geral em %s: %s", category, credentials.host, type(exc).__name__)
+        raise HTTPException(502, message) from None
+    with connections_lock:
+        overview_cache[key] = (time.time() + OVERVIEW_TTL, counts)
+    return counts
 
 
 @app.get("/api/overview")
@@ -154,7 +216,7 @@ def overview(request: Request, s=Depends(session)):
     credentials = connection_for(s)
     if credentials:
         domain = {"label": "Domínio Samba conectado", "fqdn": ".".join(part[3:] for part in credentials.base_dn.split(",")), "hostname": credentials.host, "distribution": "Linux — versão não consultada"}
-        counts = {kind: len(list_records(request, s, kind)) for kind in ("users", "groups", "ous", "computers", "policies")}
+        counts = overview_counts(s, credentials)
     else:
         domain = request.app.state.store.get_config("domain")
         counts = {kind: len(request.app.state.store.records(kind)) for kind in KINDS}
@@ -299,10 +361,14 @@ def connect(body: LdapCredentials, request: Request, s=Depends(session)):
         result = Directory(body).discover()
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from None
-    except Exception:
-        raise HTTPException(502, "Não foi possível conectar. Confira hostname, DN, credenciais, acesso LDAPS e cadeia do certificado.") from None
+    except Exception as exc:
+        category, message = classify(exc)
+        log.warning("LDAPS %s ao conectar em %s:%s: %s", category, body.host, body.port, type(exc).__name__)
+        request.app.state.store.audit(s["actor"], "conectar leitura (falhou)", body.host, after={"categoria": category}, mode="ldaps")
+        raise HTTPException(502, message) from None
     with connections_lock:
         connections[s["token_hash"]] = (body, s["expires"])
+        overview_cache.pop(s["token_hash"], None)
     request.app.state.store.audit(s["actor"], "conectar leitura", body.host, after={"base_dn": body.base_dn, "tls": "validado"}, mode="ldaps")
     return result
 
@@ -311,5 +377,6 @@ def connect(body: LdapCredentials, request: Request, s=Depends(session)):
 def disconnect(request: Request, s=Depends(session)):
     with connections_lock:
         connections.pop(s["token_hash"], None)
+        overview_cache.pop(s["token_hash"], None)
     request.app.state.store.audit(s["actor"], "desconectar", "LDAPS", mode="ldaps")
     return {"ok": True}

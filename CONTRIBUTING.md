@@ -6,7 +6,7 @@ Desenvolvimento por **JLW Security**. Código-fonte disponível sob **GPL-3.0-or
 2. Crie um fork e uma branch de trabalho.
 3. Siga as instruções do README para executar o painel localmente.
 4. Envie um pull request explicando a alteração, sua motivação e eventuais limites.
-5. Informe quais verificações foram realizadas; não declare validação em domínio real sem evidência.
+5. Rode `.venv/bin/python -m pytest` e informe quais verificações foram realizadas; não declare validação em domínio real sem evidência.
 
 Preserve os créditos existentes, os avisos de copyright e os identificadores SPDX. Ao contribuir, você disponibiliza sua contribuição sob GPL versão 3 ou posterior, conforme a licença do projeto. Não é exigida transferência de copyright para a JLW Security.
 

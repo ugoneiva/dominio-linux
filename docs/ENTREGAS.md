@@ -18,6 +18,19 @@
 
 Os itens marcados representam implementação. Não representam testes aprovados ou validação em produção.
 
+## 0.1.1 — Correções do instalador, conferência e testes (14/10/2026)
+
+- [x] Assistente e instalador recusam hostname igual ao nome NetBIOS do domínio (o `samba-tool` recusa o provisionamento).
+- [x] `samba-ad-provision` explícito em todos os perfis apt (no Ubuntu 24.04 ele é só Recommends do `samba-ad-dc`).
+- [x] Conferência final real do controlador, com resultado em `result.json`.
+- [x] CA do LDAPS do Samba, SHA-256, hostname e DN mostrados ao fim, com teste de handshake validado.
+- [x] Auditoria JSON do Samba (autenticação, diretório, senhas, grupos) com rotação.
+- [x] Backup diário `samba-tool domain backup offline` (systemd timer, 14 dias).
+- [x] Visão geral em modo LDAPS: contagem numa conexão só, sem atributos, com cache de 2 min por sessão.
+- [x] Erros LDAPS classificados (certificado, credenciais, conexão, DN), registrados no log sem credenciais.
+- [x] Limite de corpo por middleware ASGI, sem atributo interno do Starlette.
+- [x] Primeiros testes automatizados (pytest).
+
 ## 0.2 — Domínio real em laboratório
 
 - [ ] Definir VM nova, rede, nome DNS e primeiro controlador.
@@ -45,7 +58,7 @@ Os itens marcados representam implementação. Não representam testes aprovados
 ## 0.4 — Continuidade e operação
 
 - [ ] Incluir segundo DC Linux, replicação e distribuição do SYSVOL.
-- [ ] Implementar backups do domínio e recuperação em laboratório isolado.
+- [ ] Recuperação do domínio a partir do backup diário (`samba-tool domain backup restore`) em laboratório isolado.
 - [ ] Documentar atualização, migração e retomada de tarefas interrompidas.
 - [ ] Exportar auditoria para destino externo com retenção.
 - [ ] Preparar implantação por TLS na rede e limites operacionais.

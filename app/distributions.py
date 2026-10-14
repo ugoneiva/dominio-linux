@@ -1,7 +1,10 @@
 # Copyright (C) 2026 JLW Security. SPDX-License-Identifier: GPL-3.0-or-later
 """Catálogo de destinos; disponibilidade do instalador é uma decisão do projeto."""
 
-APT_PACKAGES = ["samba-ad-dc", "krb5-user", "smbclient", "bind9-dnsutils", "chrony", "acl", "attr", "python3-pexpect"]
+# samba-ad-provision traz os arquivos usados pelo `samba-tool domain provision`. No Ubuntu 24.04
+# ele vem só como Recommends do samba-ad-dc; imagens mínimas/nuvem com Install-Recommends=false
+# ficariam sem ele e o provisionamento falharia. Por isso vai explícito em todos os perfis apt.
+APT_PACKAGES = ["samba-ad-dc", "samba-ad-provision", "krb5-user", "smbclient", "bind9-dnsutils", "chrony", "acl", "attr", "python3-pexpect"]
 
 
 def apt_profile(identifier, label, os_id, version):
@@ -10,7 +13,7 @@ def apt_profile(identifier, label, os_id, version):
         "family": "Debian / Ubuntu", "installer_available": True,
         "status": "Instalador inicial",
         "note": "Pacote de criação do primeiro controlador disponível. A execução e a validação em VM ainda estão pendentes.",
-        "packages": APT_PACKAGES + (["samba-ad-provision"] if os_id == "debian" else []),
+        "packages": list(APT_PACKAGES),
     }
 
 
