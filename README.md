@@ -134,6 +134,19 @@ Testes automatizados (validações, pacote sem senha, manifesto do instalador, a
 
 Os testes não comprovam funcionamento em Samba real: a execução do instalador em VM e a consulta LDAPS a um domínio de verdade continuam pendentes (entrega 0.2).
 
+## Identidade visual
+
+Marca do produto na família **JLW Security**: escudo com a árvore do domínio — o controlador Linux no topo,
+ligado às máquinas membros —, paleta marinho `#061226`, ciano `#00D4FF`, azul `#0A6CFF` e verde `#3DFFA8`,
+e wordmark em Orbitron/Rajdhani. Os arquivos ficam em `app/static/marca/` (logos para fundo claro e escuro,
+símbolo, favicon SVG/PNG, ícone 512 px e fundo da tela de entrada) e são gerados por:
+
+```bash
+python3 branding/gerar_marca.py   # requer fonttools e rsvg-convert
+```
+
+O texto dos SVGs é convertido em contorno, então o painel não carrega fontes externas nem afrouxa o CSP.
+
 ## Licença e créditos
 
 Copyright (C) 2026 **JLW Security**. Projeto Open Source, distribuído sob a **GNU General Public License, versão 3 ou posterior (GPL-3.0-or-later)**.

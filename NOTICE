@@ -14,3 +14,8 @@ Identificador SPDX: GPL-3.0-or-later
 Código-fonte: https://github.com/ugoneiva/dominio-linux
 
 Dependências e ferramentas externas mantêm seus próprios avisos e licenças.
+
+Identidade visual (app/static/marca/, gerada por branding/gerar_marca.py) usa as fontes
+Orbitron (Copyright 2018 The Orbitron Project Authors) e Rajdhani (Copyright 2014
+Indian Type Foundry), ambas sob a SIL Open Font License 1.1 — textos em branding/fontes/.
+Nos SVGs o texto está convertido em contorno; as fontes não são servidas pelo painel.
